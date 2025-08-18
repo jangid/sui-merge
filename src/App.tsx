@@ -6,6 +6,7 @@ import {
   ConnectButton,
   useCurrentAccount,
   useSuiClient,
+  useSuiClientContext,
   useSignTransaction,
   useSignAndExecuteTransaction,
 } from '@mysten/dapp-kit';
@@ -71,19 +72,31 @@ export function App() {
 }
 
 function Header({ rpcUrl, onRpcChange }: { rpcUrl: string; onRpcChange: (url: string) => void }) {
+  const { selectNetwork } = useSuiClientContext();
+  const setNet = (name: 'mainnet' | 'testnet' | 'devnet' | 'custom', url: string) => {
+    onRpcChange(url);
+    selectNetwork(name);
+  };
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 12, justifyContent: 'space-between', marginBottom: 16 }}>
       <h1 style={{ fontSize: 22, margin: 0 }}>Sui Utils</h1>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <div style={{ display: 'flex', gap: 6 }}>
-          <button onClick={() => onRpcChange(MAINNET_URL)} style={btnSmall}>Mainnet</button>
-          <button onClick={() => onRpcChange(TESTNET_URL)} style={btnSmall}>Testnet</button>
-          <button onClick={() => onRpcChange(DEVNET_URL)} style={btnSmall}>Devnet</button>
+          <button onClick={() => setNet('mainnet', MAINNET_URL)} style={btnSmall}>Mainnet</button>
+          <button onClick={() => setNet('testnet', TESTNET_URL)} style={btnSmall}>Testnet</button>
+          <button onClick={() => setNet('devnet', DEVNET_URL)} style={btnSmall}>Devnet</button>
         </div>
         <input
           style={{ padding: 8, minWidth: 360, border: '1px solid #ddd', borderRadius: 6 }}
           value={rpcUrl}
-          onChange={(e) => onRpcChange(e.target.value)}
+          onChange={(e) => {
+            const v = e.target.value;
+            onRpcChange(v);
+            if (v === MAINNET_URL) selectNetwork('mainnet');
+            else if (v === TESTNET_URL) selectNetwork('testnet');
+            else if (v === DEVNET_URL) selectNetwork('devnet');
+            else selectNetwork('custom');
+          }}
           placeholder="RPC URL"
         />
         <ConnectButton />
@@ -183,6 +196,7 @@ function SignBytesPanel({ enabled }: { enabled: boolean }) {
   const { mutateAsync: signTx, isPending: signing } = useSignTransaction();
   const { mutateAsync: signAndExecute, isPending: executing } = useSignAndExecuteTransaction();
   const toast = useToast();
+  const { network } = useSuiClientContext();
 
   const doSign = async () => {
     setError(null);
@@ -207,7 +221,11 @@ function SignBytesPanel({ enabled }: { enabled: boolean }) {
       const res = await signAndExecute({ transaction: bytesB64.trim() });
       const digest = (res as any).digest as string | undefined;
       setResult({ digest });
-      toast.success(`Transaction submitted${digest ? `: ${digest}` : ''}`);
+      if (digest) {
+        toast.success(`Transaction submitted. TxHash: ${digest}`, { link: { label: 'View on SuiVision', href: buildSuiVisionTxUrl(digest, network) } });
+      } else {
+        toast.success('Transaction submitted');
+      }
     } catch (e: any) {
       const msg = e?.message ?? String(e);
       setError(msg);
@@ -283,9 +301,8 @@ function CoinGroups({ address }: { address: string }) {
       </div>
       {error && <div style={{ color: 'crimson', marginBottom: 8 }}>{error}</div>}
       <div style={{ border: '1px solid #eee', borderRadius: 8, overflow: 'hidden' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '220px 1fr 120px 220px 140px', gap: 0, padding: '10px 12px', background: '#fafafa', borderBottom: '1px solid #eee', fontWeight: 600 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 120px 220px 140px', gap: 0, padding: '10px 12px', background: '#fafafa', borderBottom: '1px solid #eee', fontWeight: 600 }}>
           <div>Name</div>
-          <div>Coin Type</div>
           <div style={{ textAlign: 'right' }}>Objects</div>
           <div style={{ textAlign: 'right' }}>Total</div>
           <div style={{ textAlign: 'right' }}>Actions</div>
@@ -326,13 +343,21 @@ async function fetchAllCoins(client: SuiClient, address: string): Promise<Coin[]
 const btnBlue: React.CSSProperties = { background: '#2563eb', color: 'white', border: '1px solid #1d4ed8', borderRadius: 6, padding: '8px 12px', cursor: 'pointer' };
 const btnGray: React.CSSProperties = { background: '#f1f5f9', color: '#111827', border: '1px solid #e5e7eb', borderRadius: 6, padding: '8px 12px', cursor: 'pointer' };
 const btnSmall: React.CSSProperties = { ...btnGray, padding: '6px 8px' };
-const btnIcon: React.CSSProperties = { ...btnGray, padding: '2px 6px', fontSize: 12, lineHeight: 1 };
+const btnIcon: React.CSSProperties = {
+  background: 'transparent',
+  border: 'none',
+  padding: 2,
+  lineHeight: 0,
+  cursor: 'pointer',
+  borderRadius: 6,
+};
 
 function CoinRow({ group, onMerged }: { group: CoinGroup; onMerged: () => void }) {
   const { mutate: signAndExecute, isPending } = useSignAndExecuteTransaction();
   const [status, setStatus] = useState<string | null>(null);
   const { data: metadata } = useCoinMetadata(group.coinType);
   const toast = useToast();
+  const { network } = useSuiClientContext();
 
   const symbol = metadata?.symbol || symbolFromType(group.coinType);
   const displayName = metadata?.name ? `${metadata.name} (${symbol})` : symbol;
@@ -354,7 +379,11 @@ function CoinRow({ group, onMerged }: { group: CoinGroup; onMerged: () => void }
         onSuccess: async (res) => {
           const digest = res.digest ?? 'submitted';
           setStatus(`Merged. Digest: ${digest}`);
-          toast.success(`Merge complete: ${digest}`);
+          if (res.digest) {
+            toast.success(`Merge complete. TxHash: ${res.digest}`, { link: { label: 'View on SuiVision', href: buildSuiVisionTxUrl(res.digest, network) } });
+          } else {
+            toast.success(`Merge complete: ${digest}`);
+          }
           setTimeout(onMerged, 1200);
         },
         onError: (err) => {
@@ -367,10 +396,9 @@ function CoinRow({ group, onMerged }: { group: CoinGroup; onMerged: () => void }
   };
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '220px 1fr 120px 220px 140px', gap: 0, padding: '10px 12px', borderBottom: '1px solid #eee', alignItems: 'center' }}>
-      <div style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{displayName}</div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-        <span title={group.coinType} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{group.coinType}</span>
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 120px 220px 140px', gap: 0, padding: '10px 12px', borderBottom: '1px solid #eee', alignItems: 'center' }}>
+      <div title={group.coinType} style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayName}</span>
         <CopyButton text={group.coinType} />
       </div>
       <div style={{ textAlign: 'right' }}>{group.count}</div>
@@ -398,6 +426,7 @@ function symbolFromType(coinType: string) {
   const parts = coinType.split('::');
   return parts[2] || coinType;
 }
+//
 
 function formatUnits(amount: bigint, decimals: number): string {
   if (decimals <= 0) return amount.toString();
@@ -418,15 +447,29 @@ function CopyButton({ text }: { text: string }) {
     try { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 900); } catch {}
   };
   return (
-    <button onClick={onCopy} title="Copy" style={btnIcon} aria-label="Copy">{copied ? '✓' : '📋'}</button>
+    <button onClick={onCopy} title="Copy" style={btnIcon} aria-label="Copy">
+      {copied ? (
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M6.5 10.5L3.5 7.5L2.5 8.5L6.5 12.5L14 5L13 4L6.5 10.5Z" fill="#16a34a"/>
+        </svg>
+      ) : (
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="5" y="3" width="8" height="10" rx="2" stroke="#4b5563" strokeWidth="1.2"/>
+          <rect x="3" y="1" width="8" height="10" rx="2" stroke="#9ca3af" strokeWidth="1.2"/>
+        </svg>
+      )}
+    </button>
   );
 }
+
+//
 
 function SplitCoinsPanel() {
   const [coinId, setCoinId] = useState('');
   const [amounts, setAmounts] = useState('');
   const { mutate: signAndExecute, isPending } = useSignAndExecuteTransaction();
   const toast = useToast();
+  const { network } = useSuiClientContext();
 
   const onSplit = () => {
     try {
@@ -446,7 +489,14 @@ function SplitCoinsPanel() {
       signAndExecute(
         { transaction: tx },
         {
-          onSuccess: (res) => { const digest = res.digest ?? 'submitted'; toast.success(`Split submitted: ${digest}`); },
+          onSuccess: (res) => {
+            const digest = res.digest ?? 'submitted';
+            if (res.digest) {
+              toast.success(`Split submitted. TxHash: ${res.digest}`, { link: { label: 'View on SuiVision', href: buildSuiVisionTxUrl(res.digest, network) } });
+            } else {
+              toast.success(`Split submitted: ${digest}`);
+            }
+          },
           onError: (err) => { const msg = err instanceof Error ? err.message : String(err); toast.error(`Split failed: ${msg}`); },
         }
       );
@@ -476,6 +526,7 @@ function TransferObjectPanel() {
   const [recipient, setRecipient] = useState('');
   const { mutate: signAndExecute, isPending } = useSignAndExecuteTransaction();
   const toast = useToast();
+  const { network } = useSuiClientContext();
 
   const onTransfer = () => {
     try {
@@ -490,7 +541,14 @@ function TransferObjectPanel() {
       signAndExecute(
         { transaction: tx },
         {
-          onSuccess: (res) => { const digest = res.digest ?? 'submitted'; toast.success(`Transfer submitted: ${digest}`); },
+          onSuccess: (res) => {
+            const digest = res.digest ?? 'submitted';
+            if (res.digest) {
+              toast.success(`Transfer submitted. TxHash: ${res.digest}`, { link: { label: 'View on SuiVision', href: buildSuiVisionTxUrl(res.digest, network) } });
+            } else {
+              toast.success(`Transfer submitted: ${digest}`);
+            }
+          },
           onError: (err) => { const msg = err instanceof Error ? err.message : String(err); toast.error(`Transfer failed: ${msg}`); },
         }
       );
@@ -534,3 +592,9 @@ function getUtilFromHash(): UtilTab {
   return 'merge';
 }
 
+function buildSuiVisionTxUrl(digest: string, network: string) {
+  const base = `https://suivision.xyz/txblock/${digest}`;
+  if (network === 'testnet') return `${base}?network=testnet`;
+  if (network === 'devnet') return `${base}?network=devnet`;
+  return base;
+}
