@@ -14,10 +14,13 @@ import { getFullnodeUrl, SuiClient } from '@mysten/sui/client';
 import { Transaction } from '@mysten/sui/transactions';
 import '@mysten/dapp-kit/dist/index.css';
 import { ToastProvider, useToast } from './toast';
+import { coinsList } from '@alphafi/alphafi-sdk';
+import { AlphalendClient, getUserPositionCapId } from '@alphafi/alphalend-sdk';
+import { setSuiClient as setSevenKSuiClient, getQuote as sevenKGetQuote, buildTx as sevenKBuildTx } from '@7kprotocol/sdk-ts';
 
 type Coin = { coinType: string; coinObjectId: string; balance: string };
 type CoinGroup = { coinType: string; count: number; total: bigint; coins: Coin[] };
-type UtilTab = 'merge' | 'sign' | 'split' | 'transfer';
+type UtilTab = 'merge' | 'sign' | 'split' | 'transfer' | 'claim-swap' | 'best-quote';
 
 const MAINNET_URL = getFullnodeUrl('mainnet');
 const TESTNET_URL = getFullnodeUrl('testnet');
@@ -117,6 +120,20 @@ function Main({ util }: { util: UtilTab }) {
       </div>
     );
   }
+  if (util === 'claim-swap') {
+    return !account ? (
+      <InfoBox title="Connect Wallet" text="Connect a wallet to claim and swap rewards." />
+    ) : (
+      <ClaimSwapRewardsPanel />
+    );
+  }
+  if (util === 'best-quote') {
+    return !account ? (
+      <InfoBox title="Connect Wallet" text="Connect a wallet to swap tokens with best quote." />
+    ) : (
+      <BestQuoteSwapPanel />
+    );
+  }
   if (util === 'split') {
     return !account ? (
       <InfoBox title="Connect Wallet" text="Connect a wallet to split your coins." />
@@ -141,16 +158,25 @@ function Main({ util }: { util: UtilTab }) {
 
 function SideNav({ current, onSelect }: { current: UtilTab; onSelect: (t: UtilTab) => void }) {
   return (
-    <aside style={{ width: 220 }}>
+    <aside style={{ width: 240, display: 'grid', gap: 12, alignSelf: 'flex-start' }}>
       <div style={{ border: '1px solid #eee', borderRadius: 8, overflow: 'hidden' }}>
         <div style={{ padding: '10px 12px', background: '#fafafa', borderBottom: '1px solid #eee', fontWeight: 600 }}>
-          Utilities
+          General Utilities
         </div>
-        <div style={{ display: 'grid' }}>
+        <div style={{ display: 'block' }}>
           <NavItem label="Merge Coins" active={current === 'merge'} onClick={() => onSelect('merge')} icon="🪙" />
           <NavItem label="Sign Transaction" active={current === 'sign'} onClick={() => onSelect('sign')} icon="✍️" />
           <NavItem label="Split Coins" active={current === 'split'} onClick={() => onSelect('split')} icon="🪓" />
           <NavItem label="Transfer Object" active={current === 'transfer'} onClick={() => onSelect('transfer')} icon="📦" />
+          <NavItem label="Best Quote Swap" active={current === 'best-quote'} onClick={() => onSelect('best-quote')} icon="🔀" />
+        </div>
+      </div>
+      <div style={{ border: '1px solid #eee', borderRadius: 8, overflow: 'hidden' }}>
+        <div style={{ padding: '10px 12px', background: '#fafafa', borderBottom: '1px solid #eee', fontWeight: 600 }}>
+          Alphalend
+        </div>
+        <div style={{ display: 'block' }}>
+          <NavItem label="Claim & Swap Rewards" active={current === 'claim-swap'} onClick={() => onSelect('claim-swap')} icon="🏆" />
         </div>
       </div>
     </aside>
@@ -589,6 +615,8 @@ function getUtilFromHash(): UtilTab {
   if (h.includes('sign')) return 'sign';
   if (h.includes('split')) return 'split';
   if (h.includes('transfer')) return 'transfer';
+  if (h.includes('claim-swap')) return 'claim-swap';
+  if (h.includes('best-quote')) return 'best-quote';
   return 'merge';
 }
 
@@ -597,4 +625,404 @@ function buildSuiVisionTxUrl(digest: string, network: string) {
   if (network === 'testnet') return `${base}?network=testnet`;
   if (network === 'devnet') return `${base}?network=devnet`;
   return base;
+}
+
+// --- Protocol utility placeholders ---
+
+function ClaimSwapRewardsPanel() {
+  const account = useCurrentAccount();
+  const client = useSuiClient();
+  const { mutate: signAndExecute, isPending } = useSignAndExecuteTransaction();
+  const toast = useToast();
+  const { network } = useSuiClientContext();
+
+  const [positionCapId, setPositionCapId] = useState('');
+  const [rewardCoins, setRewardCoins] = useState<{ symbol: string; type: string; decimals: number; balance: bigint }[]>([]);
+  const [claimableUsd, setClaimableUsd] = useState<string | null>(null);
+  const [claimableByToken, setClaimableByToken] = useState<{ symbol: string; amount: string; coinType: string }[] | null>(null);
+  const [claimableLoading, setClaimableLoading] = useState(false);
+  const [router, setRouter] = useState<'7k' | 'cetus'>('7k');
+  const [stagedSwap, setStagedSwap] = useState<{ coinType: string; amount: string }[] | null>(null);
+  const [target, setTarget] = useState<'SUI' | 'STSUI' | 'USDC'>('SUI');
+  const [slippagePct, setSlippagePct] = useState<number>(0.5);
+  const [loadingQuote, setLoadingQuote] = useState(false);
+
+  const targetType = coinsList[target].type;
+  const rewardCandidateSymbols: (keyof typeof coinsList)[] = ['ALPHA', 'USDT', 'USDC'];
+
+  const refreshRewardBalances = async () => {
+    if (!account) return;
+    const out: { symbol: string; type: string; decimals: number; balance: bigint }[] = [];
+    const candidates: string[] = (claimableByToken && claimableByToken.length)
+      ? Array.from(new Set(claimableByToken.map(c => c.coinType)))
+      : rewardCandidateSymbols.map(sym => coinsList[sym].type);
+    for (const type of candidates) {
+      let cursor: string | null = null;
+      let total = 0n;
+      do {
+        const res = await client.getCoins({ owner: account.address, coinType: type, cursor, limit: 200 });
+        for (const c of res.data) total += BigInt(c.balance);
+        cursor = res.hasNextPage ? res.nextCursor : null;
+      } while (cursor);
+      const symbol = type.split('::').pop() || 'TOKEN';
+      out.push({ symbol, type, decimals: 9, balance: total });
+    }
+    setRewardCoins(out);
+  };
+
+  const autoDetectPositionCap = async () => {
+    if (!account) return;
+    try {
+      const sdkNetwork = (network === 'custom' ? 'mainnet' : network) as 'mainnet' | 'testnet' | 'devnet';
+      const id = await getUserPositionCapId(client as any, sdkNetwork, account.address);
+      if (id) { setPositionCapId(id); toast.success('Detected PositionCap'); }
+      else toast.error('No PositionCap found on this address.');
+    } catch (e: any) {
+      toast.error(e?.message ?? String(e));
+    }
+  };
+
+  const detectClaimable = async () => {
+    if (!account) return;
+    try {
+      setClaimableLoading(true);
+      const sdkNetwork = (network === 'custom' ? 'mainnet' : network) as 'mainnet' | 'testnet' | 'devnet';
+      const alClient = new AlphalendClient(sdkNetwork, client as any);
+      const portfolios = await alClient.getUserPortfolio(account.address);
+      if (portfolios && portfolios.length > 0) {
+        const p: any = portfolios[0];
+        setClaimableUsd(String(p.rewardsToClaimUsd));
+        const list = (p.rewardsToClaim || []).map((r: any) => {
+          const coinType = String(r.coinType);
+          const sym = coinType.split('::').pop() || 'TOKEN';
+          return { symbol: sym, amount: String(r.rewardAmount), coinType };
+        });
+        setClaimableByToken(list);
+      } else {
+        setClaimableUsd('0');
+        setClaimableByToken([]);
+      }
+    } catch (e: any) {
+      setClaimableUsd(null);
+      setClaimableByToken(null);
+      toast.error(e?.message ?? String(e));
+    } finally { setClaimableLoading(false); }
+  };
+
+  const buildClaimAllTx = async () => {
+    if (!account) throw new Error('Connect wallet.');
+    if (!positionCapId) throw new Error('Enter your PositionCap ID.');
+    const alClient = new AlphalendClient('mainnet', client as any);
+    const tx = await alClient.claimRewards({
+      positionCapId,
+      address: account.address,
+      claimAndDepositAlpha: false,
+      claimAndDepositAll: false,
+    });
+    return tx;
+  };
+
+  const doClaim = async (andSwap = false) => {
+    try {
+      if (!account) throw new Error('Connect wallet.');
+      // Ensure we have latest pending rewards snapshot to stage for swap
+      if (!claimableByToken) {
+        await detectClaimable();
+      }
+      const snapshot = (claimableByToken || [])
+        .filter((r) => {
+          const n = Number(String(r.amount || '0'));
+          return isFinite(n) && n > 0;
+        })
+        .map((r) => ({ coinType: r.coinType, amount: String(r.amount) }));
+      const txb = await buildClaimAllTx();
+      signAndExecute(
+        { transaction: txb },
+        {
+          onSuccess: async (res) => {
+            toast.success(`Claim submitted. TxHash: ${res.digest}`, { link: { label: 'View on SuiVision', href: buildSuiVisionTxUrl(res.digest!, network) } });
+            // Stage amounts that were pending at claim time for swapping
+            setStagedSwap(snapshot);
+            if (andSwap) {
+              try { await client.waitForTransaction({ digest: res.digest!, options: { showEffects: true } }); } catch {}
+              await doSwapAll();
+            }
+          },
+          onError: (err) => { const msg = err instanceof Error ? err.message : String(err); toast.error(`Claim failed: ${msg}`); },
+        }
+      );
+    } catch (e: any) { toast.error(e?.message ?? String(e)); }
+  };
+
+  const doSwapAll = async () => {
+    try {
+      if (!account) throw new Error('Connect wallet.');
+      if (!stagedSwap || stagedSwap.length === 0) {
+        toast.error('No claimed rewards to swap. Claim first.');
+        return;
+      }
+      setLoadingQuote(true);
+      setSevenKSuiClient(client as any);
+      const decimalsCache = new Map<string, number>();
+      const toRaw = (amtStr: string, decimals: number): string => {
+        if (!amtStr) return '0';
+        const s = String(amtStr).trim();
+        if (!s.includes('.')) return s; // already integer
+        const [whole, fracRaw = ''] = s.split('.');
+        const frac = (fracRaw + '0'.repeat(decimals)).slice(0, decimals);
+        const wholePart = whole ? BigInt(whole) : 0n;
+        const fracPart = frac ? BigInt(frac) : 0n;
+        const scale = 10n ** BigInt(decimals);
+        return (wholePart * scale + fracPart).toString();
+      };
+      const remaining: { coinType: string; amount: string }[] = [];
+      for (const entry of stagedSwap) {
+        try {
+          const metaDecimals = decimalsCache.has(entry.coinType)
+            ? decimalsCache.get(entry.coinType)!
+            : (await client.getCoinMetadata({ coinType: entry.coinType }).catch(() => ({ decimals: 9 as number })))?.decimals ?? 9;
+          decimalsCache.set(entry.coinType, metaDecimals);
+          const raw = toRaw(entry.amount, metaDecimals);
+          if (raw === '0' || BigInt(raw) <= 0n) continue;
+          const quote = await sevenKGetQuote({ tokenIn: entry.coinType, tokenOut: targetType, amountIn: raw });
+          if (!quote) { remaining.push(entry); continue; }
+          let tx = new Transaction();
+          const built = await sevenKBuildTx({
+            quoteResponse: quote,
+            accountAddress: account.address,
+            slippage: Math.max(0, Math.min(1, slippagePct / 100)),
+            commission: { partner: '0x401c29204828bed9a2f9f65f9da9b9e54b1e43178c88811e2584e05cf2c3eb6f', commissionBps: 0 },
+            extendTx: { tx },
+          } as any);
+          tx = built.tx;
+          if (built.coinOut) tx.transferObjects([built.coinOut], account.address);
+          try { tx.setGasBudget(300_000_000); } catch {}
+          await new Promise<void>((resolve, reject) => {
+            signAndExecute({ transaction: tx }, {
+              onSuccess: () => resolve(),
+              onError: (err) => reject(err),
+            });
+          });
+        } catch (err) {
+          // Fallback: retry with slightly reduced amount and higher slippage (1.0%)
+          try {
+            const fallbackRaw = (() => { try { const v = BigInt(raw); return v > 1n ? (v - 1n).toString() : raw; } catch { return raw; } })();
+            const q2 = await sevenKGetQuote({ tokenIn: entry.coinType, tokenOut: targetType, amountIn: fallbackRaw });
+            if (!q2) throw err;
+            let tx2 = new Transaction();
+            const b2 = await sevenKBuildTx({
+              quoteResponse: q2,
+              accountAddress: account.address,
+              slippage: 0.01, // 1.0%
+              commission: { partner: '0x401c29204828bed9a2f9f65f9da9b9e54b1e43178c88811e2584e05cf2c3eb6f', commissionBps: 0 },
+              extendTx: { tx: tx2 },
+            } as any);
+            tx2 = b2.tx;
+            if (b2.coinOut) tx2.transferObjects([b2.coinOut], account.address);
+            try { tx2.setGasBudget(300_000_000); } catch {}
+            await new Promise<void>((resolve, reject) => {
+              signAndExecute({ transaction: tx2 }, {
+                onSuccess: () => resolve(),
+                onError: (e2) => reject(e2),
+              });
+            });
+          } catch (finalErr) {
+            remaining.push(entry);
+            const msg = finalErr instanceof Error ? finalErr.message : String(finalErr);
+            toast.error(`Swap failed for ${(entry.coinType || '').split('::').pop()}: ${msg}`);
+          }
+        }
+      }
+      setStagedSwap(remaining.length ? remaining : null);
+    } catch (e: any) { toast.error(e?.message ?? String(e)); }
+    finally { setLoadingQuote(false); }
+  };
+
+  const doClaimSwapCetus = async () => {
+    toast.error('Cetus single-transaction Claim + Swap is coming soon.');
+  };
+
+  // Auto-load position cap and claimables on wallet connect/switch or network change
+  useEffect(() => {
+    setPositionCapId('');
+    setClaimableUsd(null);
+    setClaimableByToken(null as any);
+    if (account?.address) {
+      (async () => {
+        try {
+          await autoDetectPositionCap();
+          await detectClaimable();
+        } catch {}
+      })();
+    }
+  }, [account?.address, network]);
+
+  return (
+    <div style={{ border: '1px solid #eee', borderRadius: 8, overflow: 'hidden' }}>
+      <div style={{ padding: '10px 12px', background: '#fafafa', borderBottom: '1px solid #eee', fontWeight: 600 }}>Claim & Swap Rewards</div>
+      <div style={{ padding: 12, display: 'grid', gap: 10 }}>
+        <div style={{ display: 'grid', gap: 8, gridTemplateColumns: '1fr', alignItems: 'end' }}>
+          <Field label="PositionCap ID">
+            <div style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', color: '#111827', wordBreak: 'break-all' }}>
+              {positionCapId || '—'}
+            </div>
+          </Field>
+        </div>
+        <div style={{ display: 'grid', gap: 8, gridTemplateColumns: '1fr', alignItems: 'end' }}>
+          <Field label="Swap Router">
+            <div style={{ display: 'flex', gap: 12 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <input type="radio" name="router" checked={router === '7k'} onChange={() => setRouter('7k')} /> 7k
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <input type="radio" name="router" checked={router === 'cetus'} onChange={() => setRouter('cetus')} /> Cetus
+              </label>
+            </div>
+          </Field>
+        </div>
+        <div style={{ display: 'grid', gap: 8, gridTemplateColumns: '1fr', alignItems: 'end' }}>
+          <Field label="Pending Rewards (pre-claim)">
+            <div style={{ display: 'grid', gap: 6 }}>
+              <div style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', color: '#374151' }}>
+                {claimableByToken && claimableByToken.length
+                  ? claimableByToken.map(r => `${r.symbol}:${r.amount}`).join(', ')
+                  : '—'}
+              </div>
+              <div style={{ color: '#4b5563' }}>Total USD: {claimableUsd ?? '—'}</div>
+              <div>
+                <button onClick={detectClaimable} disabled={claimableLoading} style={btnGray}>
+                  {claimableLoading ? 'Refreshing…' : 'Refresh pending rewards'}
+                </button>
+              </div>
+            </div>
+          </Field>
+        </div>
+        <div style={{ display: 'grid', gap: 8, gridTemplateColumns: '1fr', alignItems: 'end' }}>
+          <Field label="Swap To (target)">
+            <select style={inputStyle} value={target} onChange={(e) => setTarget(e.target.value as any)}>
+              <option value="SUI">SUI</option>
+              <option value="STSUI">stSUI</option>
+              <option value="USDC">USDC</option>
+            </select>
+          </Field>
+        </div>
+        <div style={{ display: 'grid', gap: 8, gridTemplateColumns: '1fr', alignItems: 'end' }}>
+          <Field label="Slippage">
+            <div style={{ display: 'inline-grid', gridTemplateColumns: 'repeat(3, 64px)', width: 192, border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden' }}>
+              <button
+                type="button"
+                onClick={() => setSlippagePct(0.1)}
+                aria-pressed={slippagePct === 0.1}
+                style={{
+                  padding: '6px 12px',
+                  fontSize: 13,
+                  background: slippagePct === 0.1 ? '#2563eb' : '#ffffff',
+                  color: slippagePct === 0.1 ? '#ffffff' : '#111827',
+                  border: 'none',
+                  borderRight: '1px solid #e5e7eb',
+                  cursor: 'pointer',
+                  display: 'block',
+                  width: '100%',
+                  textAlign: 'center',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                0.1%
+              </button>
+              <button
+                type="button"
+                onClick={() => setSlippagePct(0.5)}
+                aria-pressed={slippagePct === 0.5}
+                style={{
+                  padding: '6px 12px',
+                  fontSize: 13,
+                  background: slippagePct === 0.5 ? '#2563eb' : '#ffffff',
+                  color: slippagePct === 0.5 ? '#ffffff' : '#111827',
+                  border: 'none',
+                  borderRight: '1px solid #e5e7eb',
+                  cursor: 'pointer',
+                  display: 'block',
+                  width: '100%',
+                  textAlign: 'center',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                0.5%
+              </button>
+              <button
+                type="button"
+                onClick={() => setSlippagePct(1)}
+                aria-pressed={slippagePct === 1}
+                style={{
+                  padding: '6px 12px',
+                  fontSize: 13,
+                  background: slippagePct === 1 ? '#2563eb' : '#ffffff',
+                  color: slippagePct === 1 ? '#ffffff' : '#111827',
+                  border: 'none',
+                  cursor: 'pointer',
+                  display: 'block',
+                  width: '100%',
+                  textAlign: 'center',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                1.0%
+              </button>
+            </div>
+          </Field>
+        </div>
+        {router === '7k' ? (
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <button onClick={() => doClaim(false)} disabled={isPending} style={btnGray}>{isPending ? 'Claiming…' : 'Claim'}</button>
+            <button onClick={doSwapAll} disabled={isPending || loadingQuote} style={btnBlue}>{loadingQuote ? 'Routing…' : 'Swap'}</button>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <button onClick={doClaimSwapCetus} disabled={isPending || loadingQuote} style={btnBlue}>{isPending || loadingQuote ? 'Processing…' : 'Claim + Swap'}</button>
+          </div>
+        )}
+        {stagedSwap && stagedSwap.length > 0 && (
+          <div style={{ marginTop: 8, fontSize: 12, color: '#4b5563' }}>
+            Ready to swap: {stagedSwap.map((s) => `${(s.coinType || '').split('::').pop() || 'TOKEN'}:${s.amount}`).join(', ')}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function BestQuoteSwapPanel() {
+  const [fromType, setFromType] = useState('');
+  const [toType, setToType] = useState('');
+  const [amountRaw, setAmountRaw] = useState('');
+  const [info, setInfo] = useState<string | null>(null);
+
+  const onQuote = () => {
+    if (!fromType.trim() || !toType.trim() || !amountRaw.trim()) {
+      setInfo('Enter from/to coin types and amount (raw).');
+      return;
+    }
+    setInfo('Coming soon: Compare quotes across 7k, Cetus, etc.');
+  };
+
+  return (
+    <div style={{ border: '1px solid #eee', borderRadius: 8, overflow: 'hidden' }}>
+      <div style={{ padding: '10px 12px', background: '#fafafa', borderBottom: '1px solid #eee', fontWeight: 600 }}>Best Quote Swap</div>
+      <div style={{ padding: 12, display: 'grid', gap: 8 }}>
+        <Field label="From Coin Type">
+          <input style={inputStyle} placeholder="0x...::module::COIN" value={fromType} onChange={(e) => setFromType(e.target.value)} />
+        </Field>
+        <Field label="To Coin Type">
+          <input style={inputStyle} placeholder="0x...::module::COIN" value={toType} onChange={(e) => setToType(e.target.value)} />
+        </Field>
+        <Field label="Amount (raw units)">
+          <input style={inputStyle} placeholder="e.g. 100000000" value={amountRaw} onChange={(e) => setAmountRaw(e.target.value)} />
+        </Field>
+        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+          <button onClick={onQuote} style={btnBlue}>Get Best Quote (placeholder)</button>
+        </div>
+        {info && <div style={{ color: '#6b7280' }}>{info}</div>}
+      </div>
+    </div>
+  );
 }

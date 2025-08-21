@@ -5,6 +5,10 @@ A lightweight React dApp with utilities for Sui, including:
 - Merge Coins: List your coin types and merge all coin objects of a type into the largest coin.
 - Split Coins: Split a coin object into multiple outputs using raw amounts.
 - Transfer Object: Transfer any object by ID to a recipient address.
+- Best Quote Swap: Placeholder to compare swap quotes across 7k, Cetus, etc.
+
+Alphalend:
+- Claim & Swap Rewards: Placeholder to claim rewards and route swap via 7k or Cetus to SUI/stSUI or a custom coin.
 
 Run Locally
 - npm i
@@ -20,4 +24,3 @@ Tech Stack
 - @mysten/dapp-kit 0.17.3
 - @mysten/sui 1.37.2
 - @tanstack/react-query 5.x
-
