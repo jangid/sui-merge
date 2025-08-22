@@ -767,6 +767,8 @@ function ClaimSwapRewardsPanel() {
       setLoadingQuote(true);
       setSevenKSuiClient(client as any);
       const decimalsCache = new Map<string, number>();
+      const total = stagedSwap.length;
+      let successCount = 0;
       const toRaw = (amtStr: string, decimals: number): string => {
         if (!amtStr) return '0';
         const s = String(amtStr).trim();
@@ -806,6 +808,7 @@ function ClaimSwapRewardsPanel() {
               onError: (err) => reject(err),
             });
           });
+          successCount += 1;
         } catch (err) {
           // Fallback: retry with slightly reduced amount and higher slippage (1.0%)
           try {
@@ -829,6 +832,7 @@ function ClaimSwapRewardsPanel() {
                 onError: (e2) => reject(e2),
               });
             });
+            successCount += 1;
           } catch (finalErr) {
             remaining.push(entry);
             const msg = finalErr instanceof Error ? finalErr.message : String(finalErr);
@@ -837,6 +841,12 @@ function ClaimSwapRewardsPanel() {
         }
       }
       setStagedSwap(remaining.length ? remaining : null);
+      const failed = remaining.length;
+      if (successCount > 0) {
+        toast.success(`Swapped ${successCount}/${total} token(s). ${failed > 0 ? failed + ' pending' : 'All done.'}`);
+      } else {
+        toast.error('Swap failed for all tokens.');
+      }
     } catch (e: any) { toast.error(e?.message ?? String(e)); }
     finally { setLoadingQuote(false); }
   };
@@ -877,6 +887,8 @@ function ClaimSwapRewardsPanel() {
       setLoadingQuote(true);
       const sdk = initCetusSDK({ network: (network === 'custom' ? 'mainnet' : network) as 'mainnet' | 'testnet' | 'devnet' });
       const decimalsCache = new Map<string, number>();
+      const total = stagedSwap.length;
+      let successCount = 0;
       const toRaw = (amtStr: string, decimals: number): string => {
         if (!amtStr) return '0';
         const s = String(amtStr).trim();
@@ -936,6 +948,7 @@ function ClaimSwapRewardsPanel() {
               onError: (err) => reject(err),
             });
           });
+          successCount += 1;
         } catch (err) {
           // Retry with slightly reduced amount and higher slippage
           try {
@@ -963,6 +976,7 @@ function ClaimSwapRewardsPanel() {
                 onError: (e2) => reject(e2),
               });
             });
+            successCount += 1;
           } catch (finalErr) {
             remaining.push(entry);
             const msg = finalErr instanceof Error ? finalErr.message : String(finalErr);
@@ -971,6 +985,12 @@ function ClaimSwapRewardsPanel() {
         }
       }
       setStagedSwap(remaining.length ? remaining : null);
+      const failed = remaining.length;
+      if (successCount > 0) {
+        toast.success(`Cetus swapped ${successCount}/${total} token(s). ${failed > 0 ? failed + ' pending' : 'All done.'}`);
+      } else {
+        toast.error('Cetus swap failed for all tokens.');
+      }
     } catch (e: any) { toast.error(e?.message ?? String(e)); }
     finally { setLoadingQuote(false); }
   };
