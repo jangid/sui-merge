@@ -17,6 +17,7 @@ import { ToastProvider, useToast } from './toast';
 import { coinsList } from '@alphafi/alphafi-sdk';
 import { AlphalendClient, getUserPositionCapId } from '@alphafi/alphalend-sdk';
 import { setSuiClient as setSevenKSuiClient, getQuote as sevenKGetQuote, buildTx as sevenKBuildTx } from '@7kprotocol/sdk-ts';
+import { initCetusSDK } from '@cetusprotocol/cetus-sui-clmm-sdk';
 
 type Coin = { coinType: string; coinObjectId: string; balance: string };
 type CoinGroup = { coinType: string; count: number; total: bigint; coins: Coin[] };
@@ -725,15 +726,17 @@ function ClaimSwapRewardsPanel() {
   const doClaim = async (andSwap = false) => {
     try {
       if (!account) throw new Error('Connect wallet.');
-      // Ensure we have latest pending rewards snapshot to stage for swap
-      if (!claimableByToken) {
-        await detectClaimable();
-      }
-      const snapshot = (claimableByToken || [])
-        .filter((r) => {
-          const n = Number(String(r.amount || '0'));
-          return isFinite(n) && n > 0;
-        })
+      // Always fetch fresh claimables snapshot to stage
+      const claimablesNow = await (async () => {
+        const sdkNetwork = (network === 'custom' ? 'mainnet' : network) as 'mainnet' | 'testnet' | 'devnet';
+        const alClient = new AlphalendClient(sdkNetwork, client as any);
+        const portfolios = await alClient.getUserPortfolio(account.address);
+        if (!portfolios || portfolios.length === 0) return [] as { coinType: string; amount: string }[];
+        const p: any = portfolios[0];
+        return (p.rewardsToClaim || []).map((r: any) => ({ coinType: String(r.coinType), amount: String(r.rewardAmount) }));
+      })();
+      const snapshot = claimablesNow
+        .filter((r) => { const n = Number(String(r.amount || '0')); return isFinite(n) && n > 0; })
         .map((r) => ({ coinType: r.coinType, amount: String(r.amount) }));
       const txb = await buildClaimAllTx();
       signAndExecute(
@@ -839,7 +842,137 @@ function ClaimSwapRewardsPanel() {
   };
 
   const doClaimSwapCetus = async () => {
-    toast.error('Cetus single-transaction Claim + Swap is coming soon.');
+    try {
+      if (!account) throw new Error('Connect wallet.');
+      if (!claimableByToken) await detectClaimable();
+      const snapshot = (claimableByToken || [])
+        .filter((r) => {
+          const n = Number(String(r.amount || '0'));
+          return isFinite(n) && n > 0;
+        })
+        .map((r) => ({ coinType: r.coinType, amount: String(r.amount) }));
+      const txb = await buildClaimAllTx();
+      signAndExecute(
+        { transaction: txb },
+        {
+          onSuccess: async (res) => {
+            toast.success(`Claim submitted. TxHash: ${res.digest}`, { link: { label: 'View on SuiVision', href: buildSuiVisionTxUrl(res.digest!, network) } });
+            setStagedSwap(snapshot);
+            try { await client.waitForTransaction({ digest: res.digest!, options: { showEffects: true } }); } catch {}
+            await doSwapAllCetus();
+          },
+          onError: (err) => { const msg = err instanceof Error ? err.message : String(err); toast.error(`Claim failed: ${msg}`); },
+        }
+      );
+    } catch (e: any) { toast.error(e?.message ?? String(e)); }
+  };
+
+  const doSwapAllCetus = async () => {
+    try {
+      if (!account) throw new Error('Connect wallet.');
+      if (!stagedSwap || stagedSwap.length === 0) {
+        toast.error('No claimed rewards to swap. Claim first.');
+        return;
+      }
+      setLoadingQuote(true);
+      const sdk = initCetusSDK({ network: (network === 'custom' ? 'mainnet' : network) as 'mainnet' | 'testnet' | 'devnet' });
+      const decimalsCache = new Map<string, number>();
+      const toRaw = (amtStr: string, decimals: number): string => {
+        if (!amtStr) return '0';
+        const s = String(amtStr).trim();
+        if (!s.includes('.')) return s;
+        const [whole, fracRaw = ''] = s.split('.');
+        const frac = (fracRaw + '0'.repeat(decimals)).slice(0, decimals);
+        const wholePart = whole ? BigInt(whole) : 0n;
+        const fracPart = frac ? BigInt(frac) : 0n;
+        const scale = 10n ** BigInt(decimals);
+        return (wholePart * scale + fracPart).toString();
+      };
+      const remaining: { coinType: string; amount: string }[] = [];
+      for (const entry of stagedSwap) {
+        try {
+          const metaDecimals = decimalsCache.has(entry.coinType)
+            ? decimalsCache.get(entry.coinType)!
+            : (await client.getCoinMetadata({ coinType: entry.coinType }).catch(() => ({ decimals: 9 as number })))?.decimals ?? 9;
+          decimalsCache.set(entry.coinType, metaDecimals);
+          const raw = toRaw(entry.amount, metaDecimals);
+          if (raw === '0' || BigInt(raw) <= 0n) continue;
+          const pools = await sdk.Pool.getPoolByCoins([entry.coinType, targetType]);
+          if (!pools || pools.length === 0) {
+            remaining.push(entry);
+            toast.error(`No Cetus pool found for ${(entry.coinType || '').split('::').pop()}→${(targetType || '').split('::').pop()}`);
+            continue;
+          }
+          const bestPool = (() => {
+            try { return pools.sort((a: any, b: any) => Number((b.liquidity || '0')) - Number((a.liquidity || '0')))[0]; } catch { return pools[0]; }
+          })();
+          const a2b = bestPool.coinTypeA === entry.coinType && bestPool.coinTypeB === targetType;
+          const by_amount_in = true;
+          const amount_in = raw;
+          const slippage = Math.max(0, Math.min(1, slippagePct / 100));
+          // pre-swap (optional) - not strictly needed but helpful to validate
+          try {
+            await sdk.Swap.preSwap({
+              pool_id: bestPool.poolAddress || bestPool.pool_id || bestPool.id,
+              a2b,
+              by_amount_in,
+              amount: amount_in,
+            });
+          } catch {}
+          // create tx
+          let tx = await sdk.Swap.createSwapTransactionPayload({
+            pool_id: bestPool.poolAddress || bestPool.pool_id || bestPool.id,
+            a2b,
+            by_amount_in,
+            amount: amount_in,
+            slippage,
+            coinTypeA: bestPool.coinTypeA,
+            coinTypeB: bestPool.coinTypeB,
+          } as any);
+          try { tx.setGasBudget(300_000_000); } catch {}
+          await new Promise<void>((resolve, reject) => {
+            signAndExecute({ transaction: tx }, {
+              onSuccess: () => resolve(),
+              onError: (err) => reject(err),
+            });
+          });
+        } catch (err) {
+          // Retry with slightly reduced amount and higher slippage
+          try {
+            const pools = await sdk.Pool.getPoolByCoins([entry.coinType, targetType]);
+            if (!pools || pools.length === 0) throw err;
+            const bestPool = pools[0];
+            const a2b = bestPool.coinTypeA === entry.coinType && bestPool.coinTypeB === targetType;
+            const by_amount_in = true;
+            const metaDecimals = decimalsCache.get(entry.coinType) ?? 9;
+            const raw = toRaw(entry.amount, metaDecimals);
+            const fallbackRaw = (() => { try { const v = BigInt(raw); return v > 1n ? (v - 1n).toString() : raw; } catch { return raw; } })();
+            let tx2 = await sdk.Swap.createSwapTransactionPayload({
+              pool_id: bestPool.poolAddress || bestPool.pool_id || bestPool.id,
+              a2b,
+              by_amount_in,
+              amount: fallbackRaw,
+              slippage: 0.01, // 1.0%
+              coinTypeA: bestPool.coinTypeA,
+              coinTypeB: bestPool.coinTypeB,
+            } as any);
+            try { tx2.setGasBudget(300_000_000); } catch {}
+            await new Promise<void>((resolve, reject) => {
+              signAndExecute({ transaction: tx2 }, {
+                onSuccess: () => resolve(),
+                onError: (e2) => reject(e2),
+              });
+            });
+          } catch (finalErr) {
+            remaining.push(entry);
+            const msg = finalErr instanceof Error ? finalErr.message : String(finalErr);
+            toast.error(`Cetus swap failed for ${(entry.coinType || '').split('::').pop()}: ${msg}`);
+          }
+        }
+      }
+      setStagedSwap(remaining.length ? remaining : null);
+    } catch (e: any) { toast.error(e?.message ?? String(e)); }
+    finally { setLoadingQuote(false); }
   };
 
   // Auto-load position cap and claimables on wallet connect/switch or network change
