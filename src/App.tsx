@@ -18,9 +18,8 @@ import { coinsList } from '@alphafi/alphafi-sdk';
 import { AlphalendClient, getUserPositionCapId } from '@alphafi/alphalend-sdk';
 import { setSuiClient as setSevenKSuiClient, getQuote as sevenKGetQuote, buildTx as sevenKBuildTx } from '@7kprotocol/sdk-ts';
 import { initCetusSDK } from '@cetusprotocol/cetus-sui-clmm-sdk';
+import { Coin, CoinGroup, groupCoins, formatUnits, symbolFromType, buildSuiVisionTxUrl } from './lib/utils';
 
-type Coin = { coinType: string; coinObjectId: string; balance: string };
-type CoinGroup = { coinType: string; count: number; total: bigint; coins: Coin[] };
 type UtilTab = 'merge' | 'sign' | 'split' | 'transfer' | 'claim-swap' | 'best-quote';
 
 const MAINNET_URL = getFullnodeUrl('mainnet');
@@ -343,18 +342,6 @@ function CoinGroups({ address }: { address: string }) {
   );
 }
 
-function groupCoins(coins: Coin[]): CoinGroup[] {
-  const map = new Map<string, CoinGroup>();
-  for (const c of coins) {
-    const g = map.get(c.coinType) ?? { coinType: c.coinType, count: 0, total: 0n, coins: [] };
-    g.count += 1;
-    g.total = BigInt(g.total) + BigInt(c.balance);
-    g.coins.push(c);
-    map.set(c.coinType, g);
-  }
-  return Array.from(map.values()).sort((a, b) => b.count - a.count);
-}
-
 async function fetchAllCoins(client: SuiClient, address: string): Promise<Coin[]> {
   const out: Coin[] = [];
   let cursor: string | null = null;
@@ -448,26 +435,7 @@ function useCoinMetadata(coinType: string) {
     staleTime: 5 * 60 * 1000,
   });
 }
-
-function symbolFromType(coinType: string) {
-  const parts = coinType.split('::');
-  return parts[2] || coinType;
-}
 //
-
-function formatUnits(amount: bigint, decimals: number): string {
-  if (decimals <= 0) return amount.toString();
-  const s = amount.toString();
-  const negative = s.startsWith('-');
-  const digits = negative ? s.slice(1) : s;
-  const pad = decimals - digits.length;
-  const whole = pad >= 0 ? '0' : digits.slice(0, digits.length - decimals);
-  const fracRaw = pad >= 0 ? '0'.repeat(pad) + digits : digits.slice(digits.length - decimals);
-  const frac = fracRaw.replace(/0+$/, '');
-  const out = frac.length ? `${whole}.${frac}` : whole;
-  return negative ? `-${out}` : out;
-}
-
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
   const onCopy = async () => {
@@ -619,13 +587,6 @@ function getUtilFromHash(): UtilTab {
   if (h.includes('claim-swap')) return 'claim-swap';
   if (h.includes('best-quote')) return 'best-quote';
   return 'merge';
-}
-
-function buildSuiVisionTxUrl(digest: string, network: string) {
-  const base = `https://suivision.xyz/txblock/${digest}`;
-  if (network === 'testnet') return `${base}?network=testnet`;
-  if (network === 'devnet') return `${base}?network=devnet`;
-  return base;
 }
 
 // --- Protocol utility placeholders ---
@@ -1179,3 +1140,6 @@ function BestQuoteSwapPanel() {
     </div>
   );
 }
+
+// Named exports for unit testing of pure helpers
+export { groupCoins, buildSuiVisionTxUrl, formatUnits, symbolFromType };
