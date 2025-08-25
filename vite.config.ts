@@ -12,7 +12,7 @@ export default defineConfig({
     pool: 'vmThreads',
     threads: false,
     coverage: {
-      provider: 'v8',
+      provider: (process.env.CI_COVERAGE_PROVIDER as 'v8' | 'istanbul') || 'v8',
       reporter: ['text', 'lcov'],
       include: ['src/**/*.ts', 'src/**/*.tsx'],
       exclude: ['src/**/*.d.ts'],
