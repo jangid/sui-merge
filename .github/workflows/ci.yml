@@ -43,6 +43,11 @@ jobs:
         run: npm run coverage
         env:
           ROLLUP_USE_NODEJS: 'true'
+          CI_COVERAGE_PROVIDER: 'istanbul'
+          CI_COVERAGE_THRESH_LINES: '70'
+          CI_COVERAGE_THRESH_FUNCTIONS: '65'
+          CI_COVERAGE_THRESH_STATEMENTS: '70'
+          CI_COVERAGE_THRESH_BRANCHES: '45'
 
       - name: Upload coverage (lcov)
         if: always()
