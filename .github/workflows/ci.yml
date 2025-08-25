@@ -28,9 +28,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          # npm ci can fail to resolve rollup native optional deps across OSes
-          # Use npm install to resolve platform-specific optional packages in CI
-          npm install
+          # Ensure Linux-native optional deps for Rollup resolve correctly
+          rm -f package-lock.json
+          npm install --no-audit --no-fund
 
       - name: Run tests
         run: npm run test:run
