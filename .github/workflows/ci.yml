@@ -18,6 +18,14 @@ jobs:
           node-version: '20'
           cache: npm
 
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-modules-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-modules-
+
       - name: Install dependencies
         run: |
           # npm ci can fail to resolve rollup native optional deps across OSes
@@ -26,9 +34,13 @@ jobs:
 
       - name: Run tests
         run: npm run test:run
+        env:
+          ROLLUP_USE_NODEJS: 'true'
 
       - name: Coverage
         run: npm run coverage
+        env:
+          ROLLUP_USE_NODEJS: 'true'
 
       - name: Upload coverage (lcov)
         if: always()
