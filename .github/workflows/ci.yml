@@ -18,13 +18,15 @@ jobs:
           node-version: '20'
           cache: npm
 
-      - name: Cache node_modules
+      - name: Cache Vite/Vitest transform caches
         uses: actions/cache@v4
         with:
-          path: node_modules
-          key: ${{ runner.os }}-modules-${{ hashFiles('package-lock.json') }}
+          path: |
+            node_modules/.vite
+            node_modules/.vitest
+          key: ${{ runner.os }}-vite-vitest-${{ hashFiles('package-lock.json', 'vite.config.ts', 'tsconfig.json') }}
           restore-keys: |
-            ${{ runner.os }}-modules-
+            ${{ runner.os }}-vite-vitest-
 
       - name: Install dependencies
         run: |
